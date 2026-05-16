@@ -31,3 +31,15 @@ Chronological log of work sessions. Most recent first below the divider.
 **Open questions / blockers:** Real numbers require the operator to (a) `make up SCALE=1m`, then (b) set the per-engine env vars and run `vector-bench run --backend {pgvector,qdrant,weaviate}`. The harness and adapters are shipped; the cost-bearing decision to actually `apply` belongs to the operator.
 
 **Next session:** Issue #3 (HNSW parameter sweep), #4 (latency-under-load study), or #5 (cost per query) — all compose this harness unchanged.
+
+## 2026-05-16 — Issue #2: Mark PR #7 ready + squash-merge
+**Duration:** ~10 min · **Branch:** `session/2026-05-15-1933-issue-2` (merged + deleted)
+
+- Verified the three acceptance criteria are functionally satisfied by the shipped harness: same workload across three adapters via the `Backend` Protocol, structured JSON per run via `run_benchmark` writing `results/<run_id>.json`, re-runs idempotent via the `force=True` guard. Local hermetic suite 23/23 green; ruff check clean.
+- Marked PR #7 ready and squash-merged into `main` at 2026-05-16T15:16Z (per D-004's scheduled-session merge override). Branch deleted; issue #2 closed.
+
+**Why this work, this session:** PR #7 had been parked as a draft since 2026-05-15 even though all five CI checks were green. The harness blocks issues #3 (HNSW sweep) and #4 (latency-under-load), so getting it on `main` unblocks two more priority:high issues.
+
+**Open questions / blockers:** None. Real numbers still pending the operator's cost-bearing `make up` + `vector-bench run` — that's documented in `docs/benchmarks.md`.
+
+**Next session:** Issue #4 (latency-under-load study) is the highest-leverage next step; #3 (HNSW tuning) also unblocked.

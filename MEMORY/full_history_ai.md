@@ -195,3 +195,49 @@ context_for_next_session:
 decisions_made: []
 followups: ["#12"]
 ---
+
+---
+session: 2026-05-19T15:26Z
+duration_min: 30
+issue: 14
+focus: snapshot_test_locks_hnsw_recommended_defaults_row_to_live_grid
+delta:
+  files_added: 1   # tests/test_hnsw_recommended_defaults_snapshot.py
+  files_changed: 0
+  tests_added: 3
+  test_pass_rate: "91/91"
+context_for_next_session:
+  - third_snapshot_test_in_this_repo_after_readme_snapshot_and_cost_table
+  - test_imports_hnsw_grid_via_importlib_util_spec_from_file_location_no_pythonpath_dep
+  - module_scoped_fixture_runs_36_cell_default_grid_once_seed_1_about_9_seconds_on_laptop
+  - knee_logic_min_p95_among_cells_with_mean_recall_at_k_ge_0_95
+  - assertions_parameter_triple_32_100_128_plus_recall_0_998_within_abs_5e_4_plus_readme_row_anchor
+  - p95_intentionally_not_locked_wall_clock_dependent_documented_in_docstring
+  - live_rerun_today_produced_p95_1_89ms_vs_committed_2_02ms_validates_design_choice_to_exclude_p95
+  - tamper_verified_readme_0_998_to_0_999_fires_row_anchor_assertion_with_regen_hint
+  - no_new_d_entry_d_009_governs_simulation_backend
+decisions_made: []
+followups: []
+---
+
+---
+session: 2026-05-19T19:50Z
+duration_min: 35
+issue: 14
+focus: redesign_hnsw_recommended_defaults_snapshot_for_cross_platform_stability
+delta:
+  files_changed: 1   # tests/test_hnsw_recommended_defaults_snapshot.py
+  tests_added: 0     # net (replaced 3 brittle tests with 3 stable tests)
+  test_pass_rate: "91/91"
+context_for_next_session:
+  - pr15_failed_ci_with_min_p95_knee_selection_was_inherently_wall_clock_flaky
+  - root_cause_compounded_float32_dot_blas_variance_across_platforms_perturbs_recall_by_0_001_0_002_plus_microsecond_p95_differences_flip_argmin
+  - replaced_three_tests_with_more_robust_design_readme_row_anchor_plus_recall_at_exact_readme_cell_within_5e_3_plus_pareto_family_membership
+  - did_not_touch_hnsw_sim_backend_kept_float32_internal_no_d_change_to_d_009
+  - did_not_pin_numpy_in_ci_test_level_fix_suffices_for_snapshot_pattern_intent
+  - tamper_verified_3_of_3_readme_row_mutation_recall_expected_900_family_min_recall_to_9999
+  - all_91_tests_pass_local_ruff_check_clean_format_clean
+  - pushed_to_existing_session_branch_for_issue_14_pr_15_should_now_pass_ci
+decisions_made: []
+followups: []
+---

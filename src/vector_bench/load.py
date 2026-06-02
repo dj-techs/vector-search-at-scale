@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -61,8 +61,27 @@ class LoadCell:
     started_at: str
     git_sha: str | None
 
+    def to_dict(self) -> dict[str, Any]:
+        # Ten-field contract (#39). Nests `workload.to_dict()` +
+        # `query_latency.to_dict()` so a future internal-only field on
+        # `Workload` or `LatencyStats` can't silently leak into the
+        # per-cell JSON consumed by `scripts/plot_latency.py`.
+        return {
+            "run_id": self.run_id,
+            "backend": self.backend,
+            "workload": self.workload.to_dict(),
+            "concurrency": self.concurrency,
+            "ingest_seconds": self.ingest_seconds,
+            "query_latency": self.query_latency.to_dict(),
+            "mean_recall_at_k": self.mean_recall_at_k,
+            "throughput_qps": self.throughput_qps,
+            "started_at": self.started_at,
+            "git_sha": self.git_sha,
+        }
+
     def to_json(self) -> dict[str, Any]:
-        return asdict(self)
+        # Back-compat alias (#39).
+        return self.to_dict()
 
 
 @dataclass(frozen=True)
@@ -74,13 +93,20 @@ class LoadMatrix:
     workload: Workload
     cells: tuple[LoadCell, ...]
 
-    def to_json(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
+        # Four-field contract (#39). `cells` is a list of dicts in
+        # original order (NOT a tuple — JSON has no tuple type) so
+        # consumers reading `matrix.json` see a stable list shape.
         return {
             "run_id": self.run_id,
             "backend": self.backend,
-            "workload": asdict(self.workload),
-            "cells": [c.to_json() for c in self.cells],
+            "workload": self.workload.to_dict(),
+            "cells": [c.to_dict() for c in self.cells],
         }
+
+    def to_json(self) -> dict[str, Any]:
+        # Back-compat alias (#39).
+        return self.to_dict()
 
 
 def _execute_at_concurrency(
@@ -158,7 +184,10 @@ def run_under_load(
 
     out_dir = Path(results_dir) / run_id
     matrix_path = out_dir / "matrix.json"
-    if not force and matrix_path.exists():
+    if write_json and not force and matrix_path.exists():
+        # Pre-flight the force-check before paying ingest + sweep cost
+        # (same pattern as `run_benchmark`); the dump wrapper re-runs
+        # the check at write time but `force=True` from us skips it.
         raise FileExistsError(
             f"matrix already exists at {matrix_path}; pass force=True to overwrite"
         )
@@ -209,27 +238,48 @@ def run_under_load(
     matrix = LoadMatrix(run_id=run_id, backend=backend.name, workload=workload, cells=tuple(cells))
 
     if write_json:
-        for cell in cells:
-            atomic_write_text(
-                out_dir / f"c{cell.concurrency:03d}.json",
-                json.dumps(cell.to_json(), indent=2, sort_keys=True, default=_json_default),
-            )
-        atomic_write_text(
-            matrix_path,
-            json.dumps(matrix.to_json(), indent=2, sort_keys=True, default=_json_default),
-        )
+        # Idempotency contract belongs to `dump_load_matrix_json` (#39).
+        dump_load_matrix_json(out_dir, matrix=matrix, force=True)
 
     return matrix
 
 
-def _json_default(obj: Any) -> Any:  # noqa: ANN401
-    if hasattr(obj, "to_json"):
-        return obj.to_json()
-    if hasattr(obj, "_asdict"):
-        return obj._asdict()
-    if hasattr(obj, "__dict__"):
-        return obj.__dict__
-    raise TypeError(f"unserializable: {type(obj).__name__}")
+def dump_load_matrix_json(
+    out_dir: str | Path,
+    *,
+    matrix: LoadMatrix,
+    force: bool = False,
+) -> Path:
+    """Atomically write `matrix.json` + one `c<NNN>.json` per cell into ``out_dir`` (#39).
+
+    Pulls the inline per-cell + matrix.json writes out of
+    `run_under_load` so callers that build a `LoadMatrix` outside the
+    runner (cross-run aggregation, ad-hoc analysis) can materialize one
+    through the same idempotency contract.
+
+    Refuses to overwrite an existing ``out_dir/matrix.json`` unless
+    ``force=True`` — same D-007 idempotency posture as
+    `dump_benchmark_json`. Routes through `vector_bench.io_utils
+    .atomic_write_text` per D-012.
+
+    Returns the resolved `matrix.json` path.
+    """
+    out_dir_path = Path(out_dir)
+    matrix_path = out_dir_path / "matrix.json"
+    if not force and matrix_path.exists():
+        raise FileExistsError(
+            f"matrix already exists at {matrix_path}; pass force=True to overwrite"
+        )
+    for cell in matrix.cells:
+        atomic_write_text(
+            out_dir_path / f"c{cell.concurrency:03d}.json",
+            json.dumps(cell.to_dict(), indent=2, sort_keys=True),
+        )
+    atomic_write_text(
+        matrix_path,
+        json.dumps(matrix.to_dict(), indent=2, sort_keys=True),
+    )
+    return matrix_path
 
 
 def render_table(matrices: list[LoadMatrix]) -> str:

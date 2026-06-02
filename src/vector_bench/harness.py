@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +74,20 @@ class Workload:
         if self.top_k > self.n_vectors:
             raise ValueError(f"top_k ({self.top_k}) exceeds n_vectors ({self.n_vectors})")
 
+    def to_dict(self) -> dict[str, Any]:
+        # Explicit field-by-field construction (#39) instead of `asdict`
+        # so a future internal-only field can't silently ship into the
+        # output JSON. Downstream consumers (plot scripts, dashboard,
+        # cross-run analysis) bind to this exact six-field contract.
+        return {
+            "n_vectors": self.n_vectors,
+            "dim": self.dim,
+            "n_queries": self.n_queries,
+            "top_k": self.top_k,
+            "seed": self.seed,
+            "concurrency": self.concurrency,
+        }
+
 
 @dataclass(frozen=True)
 class QueryHit:
@@ -87,6 +101,15 @@ class LatencyStats:
     p95_ms: float
     p99_ms: float
     max_ms: float
+
+    def to_dict(self) -> dict[str, Any]:
+        # Four-field contract (#39).
+        return {
+            "p50_ms": self.p50_ms,
+            "p95_ms": self.p95_ms,
+            "p99_ms": self.p99_ms,
+            "max_ms": self.max_ms,
+        }
 
 
 @dataclass(frozen=True)
@@ -105,9 +128,30 @@ class BenchmarkResult:
     cost_per_query_usd: float | None  # populated by issue #5
     extra: dict[str, Any] = field(default_factory=dict)
 
+    def to_dict(self) -> dict[str, Any]:
+        # Eleven-field contract (#39). Nests `workload.to_dict()` and
+        # `query_latency.to_dict()` so the nested shape is also pinned
+        # by the nested classes' own contracts. `extra` is shallow-copied
+        # so callers can't mutate the frozen dataclass through the dict.
+        return {
+            "run_id": self.run_id,
+            "backend": self.backend,
+            "workload": self.workload.to_dict(),
+            "ingest_seconds": self.ingest_seconds,
+            "ingest_rows_per_sec": self.ingest_rows_per_sec,
+            "query_latency": self.query_latency.to_dict(),
+            "mean_recall_at_k": self.mean_recall_at_k,
+            "started_at": self.started_at,
+            "git_sha": self.git_sha,
+            "cost_per_query_usd": self.cost_per_query_usd,
+            "extra": dict(self.extra),
+        }
+
     def to_json(self) -> dict[str, Any]:
-        payload = asdict(self)
-        return payload
+        # Back-compat alias; callers (cli.py, run_benchmark, downstream
+        # scripts) continue to call `.to_json()`. The contract is owned
+        # by `to_dict()` (#39).
+        return self.to_dict()
 
 
 def generate_corpus(workload: Workload) -> tuple[np.ndarray, np.ndarray, list[str], list[str]]:
@@ -212,6 +256,37 @@ def _closing(backend: Backend):
         backend.close()
 
 
+def dump_benchmark_json(
+    path: str | Path,
+    *,
+    result: BenchmarkResult,
+    force: bool = False,
+) -> Path:
+    """Atomically write `result` to `path` as JSON (#39).
+
+    Pulls the inline `force`-check + `json.dumps` + `atomic_write_text`
+    triple out of `run_benchmark` so callers that build a
+    `BenchmarkResult` outside the runner (cross-run analysis, test
+    fixtures, custom drivers) can materialize one to disk through the
+    same idempotency contract.
+
+    Refuses to overwrite an existing file unless ``force=True`` —
+    matches D-007 (one JSON per run_id under results/, no silent clobber).
+    Routes through `vector_bench.io_utils.atomic_write_text` per D-012
+    so the file is either fully written or not present, never a half-
+    written half-result.
+
+    Returns the resolved output path.
+    """
+    out_path = Path(path)
+    if not force and out_path.exists():
+        raise FileExistsError(
+            f"results file already exists at {out_path}; pass force=True to overwrite"
+        )
+    atomic_write_text(out_path, json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    return out_path
+
+
 def run_benchmark(
     backend: Backend,
     workload: Workload,
@@ -241,7 +316,11 @@ def run_benchmark(
             "(D-011 — see MEMORY/core_decisions_human.md.)"
         )
     out_path = Path(results_dir) / f"{run_id}.json"
-    if not force and out_path.exists():
+    if write_json and not force and out_path.exists():
+        # Pre-flight the force-check before running the workload so a
+        # misconfigured `run_id` collision fails fast (otherwise the
+        # operator would pay the wall-clock of the workload only to
+        # discover the destination is locked).
         raise FileExistsError(
             f"results file already exists at {out_path}; pass force=True to overwrite"
         )
@@ -287,6 +366,10 @@ def run_benchmark(
     )
 
     if write_json:
-        atomic_write_text(out_path, json.dumps(result.to_json(), indent=2, sort_keys=True))
+        # Idempotency contract belongs to `dump_benchmark_json` (#39).
+        # `force=True` is safe here because we already pre-flighted the
+        # `force=False` collision above; the second check inside the
+        # dump wrapper would never re-fire on a successful run.
+        dump_benchmark_json(out_path, result=result, force=True)
 
     return result

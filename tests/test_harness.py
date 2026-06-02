@@ -9,8 +9,11 @@ import numpy as np
 import pytest
 
 from vector_bench import (
+    BenchmarkResult,
+    LatencyStats,
     StubBackend,
     Workload,
+    dump_benchmark_json,
     generate_corpus,
     ground_truth_topk,
     recall_at_k,
@@ -201,3 +204,151 @@ class TestRecallAtKIntegerValidation:
     def test_rejects_non_int_k(self, bad) -> None:
         with pytest.raises(ValueError, match="k must be a positive integer"):
             recall_at_k(["a"], ["a"], bad)
+
+
+# ----------------------------------------------------------------------
+# #39: observability-parity — `.to_dict()` field-by-field contract pins
+# (no `dataclasses.asdict`) + `dump_benchmark_json` package-level
+# wrapper. Same shape as python-async-llm-pipelines #45,
+# rag-production-kit #51, llm-cost-optimizer #51 / #53.
+# ----------------------------------------------------------------------
+
+
+class TestWorkloadToDictContract:
+    def test_field_set_is_pinned(self) -> None:
+        # Adding or dropping a field on Workload silently breaks
+        # downstream JSON consumers; the explicit-contract method pins
+        # the six-field surface.
+        d = Workload(n_vectors=10, dim=4, n_queries=3).to_dict()
+        assert sorted(d.keys()) == [
+            "concurrency",
+            "dim",
+            "n_queries",
+            "n_vectors",
+            "seed",
+            "top_k",
+        ]
+
+    def test_values_round_trip(self) -> None:
+        w = Workload(n_vectors=42, dim=8, n_queries=7, top_k=4, seed=99, concurrency=1)
+        d = w.to_dict()
+        assert d == {
+            "n_vectors": 42,
+            "dim": 8,
+            "n_queries": 7,
+            "top_k": 4,
+            "seed": 99,
+            "concurrency": 1,
+        }
+
+
+class TestLatencyStatsToDictContract:
+    def test_field_set_is_pinned(self) -> None:
+        d = LatencyStats(p50_ms=1.0, p95_ms=2.0, p99_ms=3.0, max_ms=4.0).to_dict()
+        assert sorted(d.keys()) == ["max_ms", "p50_ms", "p95_ms", "p99_ms"]
+
+    def test_values_round_trip(self) -> None:
+        s = LatencyStats(p50_ms=1.5, p95_ms=4.0, p99_ms=9.5, max_ms=12.0)
+        assert s.to_dict() == {"p50_ms": 1.5, "p95_ms": 4.0, "p99_ms": 9.5, "max_ms": 12.0}
+
+
+class TestBenchmarkResultToDictContract:
+    def test_field_set_is_pinned(self, tmp_path: Path) -> None:
+        w = Workload(n_vectors=10, dim=4, n_queries=3, top_k=2, seed=1)
+        result = run_benchmark(StubBackend(), w, run_id="contract", results_dir=tmp_path)
+        d = result.to_dict()
+        assert sorted(d.keys()) == [
+            "backend",
+            "cost_per_query_usd",
+            "extra",
+            "git_sha",
+            "ingest_rows_per_sec",
+            "ingest_seconds",
+            "mean_recall_at_k",
+            "query_latency",
+            "run_id",
+            "started_at",
+            "workload",
+        ]
+        # Nested shapes are owned by the nested classes' to_dict() pins.
+        assert sorted(d["workload"].keys()) == [
+            "concurrency",
+            "dim",
+            "n_queries",
+            "n_vectors",
+            "seed",
+            "top_k",
+        ]
+        assert sorted(d["query_latency"].keys()) == ["max_ms", "p50_ms", "p95_ms", "p99_ms"]
+
+    def test_extra_dict_is_shallow_copied(self, tmp_path: Path) -> None:
+        # The frozen-dataclass `extra` mapping is exposed only through
+        # the dict surface; mutating the returned dict must not bleed
+        # back into the BenchmarkResult instance.
+        w = Workload(n_vectors=10, dim=4, n_queries=3, top_k=2, seed=1)
+        result = run_benchmark(StubBackend(), w, run_id="extra", results_dir=tmp_path)
+        snapshot = result.to_dict()
+        snapshot["extra"]["leaked"] = "yes"
+        assert "leaked" not in result.extra
+
+    def test_to_json_alias_returns_same_payload(self, tmp_path: Path) -> None:
+        # `to_json()` survives as a thin delegate so the cli.py /
+        # downstream callers don't churn; same contract as `to_dict()`.
+        w = Workload(n_vectors=10, dim=4, n_queries=3, top_k=2, seed=1)
+        result = run_benchmark(StubBackend(), w, run_id="alias", results_dir=tmp_path)
+        assert result.to_json() == result.to_dict()
+
+
+class TestDumpBenchmarkJson:
+    def test_writes_round_trippable_json(self, tmp_path: Path) -> None:
+        w = Workload(n_vectors=10, dim=4, n_queries=3, top_k=2, seed=1)
+        result = run_benchmark(
+            StubBackend(), w, run_id="dump", results_dir=tmp_path, write_json=False
+        )
+        out_path = tmp_path / "explicit.json"
+        returned = dump_benchmark_json(out_path, result=result)
+        assert returned == out_path
+        assert out_path.exists()
+        # Round-trip through `json.loads` validates that to_dict() emits
+        # plain JSON-native types (no numpy scalars, no tuples, etc.) —
+        # previously the `default=` fallback masked any leakage.
+        payload = json.loads(out_path.read_text(encoding="utf-8"))
+        assert payload["run_id"] == "dump"
+        assert payload["workload"]["n_vectors"] == 10
+
+    def test_refuses_overwrite_without_force(self, tmp_path: Path) -> None:
+        w = Workload(n_vectors=10, dim=4, n_queries=3, top_k=2, seed=1)
+        result = run_benchmark(
+            StubBackend(), w, run_id="overwrite", results_dir=tmp_path, write_json=False
+        )
+        out_path = tmp_path / "guarded.json"
+        dump_benchmark_json(out_path, result=result)
+        with pytest.raises(FileExistsError, match="already exists"):
+            dump_benchmark_json(out_path, result=result)
+
+    def test_force_overwrites(self, tmp_path: Path) -> None:
+        w = Workload(n_vectors=10, dim=4, n_queries=3, top_k=2, seed=1)
+        result = run_benchmark(
+            StubBackend(), w, run_id="force_dump", results_dir=tmp_path, write_json=False
+        )
+        out_path = tmp_path / "force.json"
+        dump_benchmark_json(out_path, result=result)
+        # Second write must not raise.
+        dump_benchmark_json(out_path, result=result, force=True)
+
+    def test_run_benchmark_routes_through_dump_wrapper(self, tmp_path: Path, monkeypatch) -> None:
+        # `run_benchmark`'s write step delegates to `dump_benchmark_json`;
+        # patching the wrapper proves the route exists (not a duplicate
+        # inlined json.dumps path).
+        calls: list[tuple[Path, BenchmarkResult]] = []
+
+        def fake_dump(path, *, result, force=False):
+            calls.append((Path(path), result))
+            return Path(path)
+
+        monkeypatch.setattr("vector_bench.harness.dump_benchmark_json", fake_dump)
+        w = Workload(n_vectors=10, dim=4, n_queries=3, top_k=2, seed=1)
+        run_benchmark(StubBackend(), w, run_id="routed", results_dir=tmp_path)
+        assert len(calls) == 1
+        assert calls[0][0] == tmp_path / "routed.json"
+        assert isinstance(calls[0][1], BenchmarkResult)

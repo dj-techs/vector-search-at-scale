@@ -33,10 +33,17 @@ from vector_bench.harness import (
     LatencyStats,
     QueryHit,
     Workload,
+    dump_benchmark_json,
     generate_corpus,
     ground_truth_topk,
     recall_at_k,
     run_benchmark,
+)
+from vector_bench.load import (
+    LoadCell,
+    LoadMatrix,
+    dump_load_matrix_json,
+    run_under_load,
 )
 from vector_bench.prices import aws_us_east_1_snapshot
 from vector_bench.types import Backend, BackendError
@@ -53,6 +60,8 @@ __all__ = [
     "InfraSpec",
     "InstancePrice",
     "LatencyStats",
+    "LoadCell",
+    "LoadMatrix",
     "PriceTable",
     "QueryHit",
     "SECONDS_PER_MONTH",
@@ -61,11 +70,15 @@ __all__ = [
     "Workload",
     "aws_us_east_1_snapshot",
     "cost_per_query",
+    # Observability-parity dump surface (#39)
+    "dump_benchmark_json",
+    "dump_load_matrix_json",
     "generate_corpus",
     "ground_truth_topk",
     "monthly_cost",
     "recall_at_k",
     "run_benchmark",
+    "run_under_load",
 ]
 
 __version__ = "0.0.1"

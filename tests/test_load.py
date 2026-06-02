@@ -20,6 +20,7 @@ from vector_bench.backends.stub import StubBackend
 from vector_bench.harness import Workload
 from vector_bench.load import (
     LoadMatrix,
+    dump_load_matrix_json,
     render_table,
     run_under_load,
 )
@@ -220,3 +221,176 @@ def test_cli_load_rejects_bad_concurrency_string(capsys):
     assert rc == 2
     err = capsys.readouterr().err
     assert "comma-separated" in err
+
+
+# ----------------------------------------------------------------------
+# #39: observability-parity — `.to_dict()` field-by-field contract pins
+# (no `dataclasses.asdict`) + `dump_load_matrix_json` package-level
+# wrapper. Same shape as python-async-llm-pipelines #45.
+# ----------------------------------------------------------------------
+
+
+class TestLoadCellToDictContract:
+    def test_field_set_is_pinned(self, tmp_path: Path) -> None:
+        matrix = run_under_load(
+            StubBackend(),
+            _wl(),
+            run_id="cell_contract",
+            concurrency_levels=(1,),
+            results_dir=tmp_path,
+            write_json=False,
+        )
+        cell = matrix.cells[0]
+        d = cell.to_dict()
+        assert sorted(d.keys()) == [
+            "backend",
+            "concurrency",
+            "git_sha",
+            "ingest_seconds",
+            "mean_recall_at_k",
+            "query_latency",
+            "run_id",
+            "started_at",
+            "throughput_qps",
+            "workload",
+        ]
+        # Nested shapes are owned by the nested classes' to_dict() pins.
+        assert sorted(d["workload"].keys()) == [
+            "concurrency",
+            "dim",
+            "n_queries",
+            "n_vectors",
+            "seed",
+            "top_k",
+        ]
+        assert sorted(d["query_latency"].keys()) == ["max_ms", "p50_ms", "p95_ms", "p99_ms"]
+
+    def test_to_json_alias_returns_same_payload(self, tmp_path: Path) -> None:
+        matrix = run_under_load(
+            StubBackend(),
+            _wl(),
+            run_id="cell_alias",
+            concurrency_levels=(1,),
+            results_dir=tmp_path,
+            write_json=False,
+        )
+        cell = matrix.cells[0]
+        assert cell.to_json() == cell.to_dict()
+
+
+class TestLoadMatrixToDictContract:
+    def test_field_set_is_pinned(self, tmp_path: Path) -> None:
+        matrix = run_under_load(
+            StubBackend(),
+            _wl(),
+            run_id="matrix_contract",
+            concurrency_levels=(1, 4),
+            results_dir=tmp_path,
+            write_json=False,
+        )
+        d = matrix.to_dict()
+        assert sorted(d.keys()) == ["backend", "cells", "run_id", "workload"]
+        # `cells` is a list (not a tuple) so it round-trips through JSON.
+        assert isinstance(d["cells"], list)
+        assert len(d["cells"]) == 2
+        # And each cell is the same shape as LoadCell.to_dict pins.
+        assert sorted(d["cells"][0].keys()) == [
+            "backend",
+            "concurrency",
+            "git_sha",
+            "ingest_seconds",
+            "mean_recall_at_k",
+            "query_latency",
+            "run_id",
+            "started_at",
+            "throughput_qps",
+            "workload",
+        ]
+
+    def test_to_json_alias_returns_same_payload(self, tmp_path: Path) -> None:
+        matrix = run_under_load(
+            StubBackend(),
+            _wl(),
+            run_id="matrix_alias",
+            concurrency_levels=(1,),
+            results_dir=tmp_path,
+            write_json=False,
+        )
+        assert matrix.to_json() == matrix.to_dict()
+
+
+class TestDumpLoadMatrixJson:
+    def test_writes_round_trippable_per_cell_and_matrix(self, tmp_path: Path) -> None:
+        matrix = run_under_load(
+            StubBackend(),
+            _wl(),
+            run_id="dump",
+            concurrency_levels=(1, 2),
+            results_dir=tmp_path,
+            write_json=False,
+        )
+        out_dir = tmp_path / "explicit_dump"
+        returned = dump_load_matrix_json(out_dir, matrix=matrix)
+        assert returned == out_dir / "matrix.json"
+
+        # All four files present.
+        assert (out_dir / "matrix.json").exists()
+        assert (out_dir / "c001.json").exists()
+        assert (out_dir / "c002.json").exists()
+
+        # Plain JSON round-trip — no `default=` fallback needed because
+        # `to_dict()` returns native types only.
+        m = json.loads((out_dir / "matrix.json").read_text(encoding="utf-8"))
+        assert m["backend"] == "stub"
+        assert len(m["cells"]) == 2
+        cell = json.loads((out_dir / "c001.json").read_text(encoding="utf-8"))
+        assert cell["concurrency"] == 1
+
+    def test_refuses_overwrite_without_force(self, tmp_path: Path) -> None:
+        matrix = run_under_load(
+            StubBackend(),
+            _wl(),
+            run_id="ow",
+            concurrency_levels=(1,),
+            results_dir=tmp_path,
+            write_json=False,
+        )
+        out_dir = tmp_path / "guarded"
+        dump_load_matrix_json(out_dir, matrix=matrix)
+        with pytest.raises(FileExistsError, match="already exists"):
+            dump_load_matrix_json(out_dir, matrix=matrix)
+
+    def test_force_overwrites(self, tmp_path: Path) -> None:
+        matrix = run_under_load(
+            StubBackend(),
+            _wl(),
+            run_id="force",
+            concurrency_levels=(1,),
+            results_dir=tmp_path,
+            write_json=False,
+        )
+        out_dir = tmp_path / "force_dump"
+        dump_load_matrix_json(out_dir, matrix=matrix)
+        dump_load_matrix_json(out_dir, matrix=matrix, force=True)
+
+    def test_run_under_load_routes_through_dump_wrapper(self, tmp_path: Path, monkeypatch) -> None:
+        # Same proof-of-routing pattern as TestDumpBenchmarkJson —
+        # ensures the inline per-cell + matrix.json writes were really
+        # replaced (not duplicated alongside the wrapper call).
+        calls: list[tuple[Path, LoadMatrix]] = []
+
+        def fake_dump(out_dir, *, matrix, force=False):
+            calls.append((Path(out_dir), matrix))
+            return Path(out_dir) / "matrix.json"
+
+        monkeypatch.setattr("vector_bench.load.dump_load_matrix_json", fake_dump)
+        run_under_load(
+            StubBackend(),
+            _wl(),
+            run_id="routed",
+            concurrency_levels=(1, 2),
+            results_dir=tmp_path,
+        )
+        assert len(calls) == 1
+        assert calls[0][0] == tmp_path / "routed"
+        assert isinstance(calls[0][1], LoadMatrix)

@@ -74,6 +74,9 @@ SUBMODULE_ANCHORS = {
     "backends.stub": "StubBackend",
     "cost": "cost_per_query",
     "harness": "run_benchmark",
+    # `load` joined the top-level surface in #39 (observability-parity
+    # dump_*_json wrappers + LoadCell / LoadMatrix exports).
+    "load": "run_under_load",
     "prices": "aws_us_east_1_snapshot",
     "types": "Backend",
 }

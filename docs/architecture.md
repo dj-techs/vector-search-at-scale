@@ -152,6 +152,36 @@ benchmark from a `KeyboardInterrupt` mid-load.
   one monkey-patch target for the atomic-write test suite covering
   five distinct call sites.
 
+## Cross-cutting: observability-parity dump surface (#39)
+
+`BenchmarkResult`, `LoadCell`, `LoadMatrix`, `Workload`, and
+`LatencyStats` all expose `.to_dict()` with an explicit field-by-field
+contract (no `dataclasses.asdict` reliance), so a future internal-only
+field on any of them can't silently ship into the output JSON consumed
+by [`scripts/plot_hnsw_frontier.py`](./hnsw/), `scripts/plot_latency.py`,
+and `scripts/cost_table.py`. The existing `.to_json()` methods survive
+as thin delegates to `to_dict()` so cli.py / downstream callers don't
+churn.
+
+Package-level wrappers `dump_benchmark_json(path, *, result, force=False)`
+in `src/vector_bench/harness.py` and `dump_load_matrix_json(out_dir, *,
+matrix, force=False)` in `src/vector_bench/load.py` pull the inline
+`force`-check + `json.dumps` + `atomic_write_text` triples out of
+`run_benchmark` and `run_under_load`. Callers building a
+`BenchmarkResult` or `LoadMatrix` outside the runner (cross-run
+aggregation, ad-hoc analysis, custom drivers) can materialize one
+through the same D-007 idempotency contract; the runners themselves
+call the wrappers internally so the file-writing logic lives in
+exactly one place per shape.
+
+Sister to the same observability-parity surface shipped in
+`python-async-llm-pipelines` (`dump_benchmark_json`),
+`rag-production-kit` (`TelemetryStore.dump_aggregate_json`), and
+`llm-cost-optimizer` (`PromptCacheWrapper.dump_aggregate_json` +
+`SemanticCache.dump_stats_json`). With #39 landed, all four Python
+JSON-writing repos in the portfolio share the explicit-contract +
+package-level-dump shape.
+
 ## What's still operator-supplied
 
 - **Real-backend benchmark runs.** `terraform apply` + AWS credit

@@ -56,7 +56,7 @@ MIN_ACTIVE_DECISION_ID = 2
 #   - #19  Silent-lying concurrency fix — runtime gate documented
 #          inline at Layer 2's `vector-bench run` bullet rather than
 #          as a top-level architecture layer
-KNOWN_SHIPPED_ISSUES = (1, 2, 3, 4, 5, 14, 16)
+KNOWN_SHIPPED_ISSUES = (1, 2, 3, 4, 5, 14, 16, 39)
 
 # Drift shapes specific to issue #21's pre-fix state. Lowercase
 # substring match. Pinned in a tuple so a future loose edit of the
@@ -209,7 +209,7 @@ def test_banned_phrases_hard_pin_set() -> None:
 
 
 def test_known_shipped_issues_hard_pin_set() -> None:
-    assert KNOWN_SHIPPED_ISSUES == (1, 2, 3, 4, 5, 14, 16)
+    assert KNOWN_SHIPPED_ISSUES == (1, 2, 3, 4, 5, 14, 16, 39)
 
 
 def test_resolvable_prefixes_hard_pin_set() -> None:

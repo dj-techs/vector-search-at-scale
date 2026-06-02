@@ -302,3 +302,18 @@ Five production sites used `Path.write_text`: load.py's per-cell loop (most blas
 **Open questions / blockers:** none.
 
 **Next session:** continue portfolio propagation.
+
+## 2026-06-02 — Issue #39: Observability-parity to_dict() + dump_*_json wrappers
+**Duration:** ~30 min · **Branch:** `session/2026-06-02-0313-issue-39`
+
+- Replaced `dataclasses.asdict(self)` with explicit field-by-field `.to_dict()` methods on five dataclasses: `Workload` (6 fields), `LatencyStats` (4 fields), `BenchmarkResult` (11 fields), `LoadCell` (10 fields), `LoadMatrix` (4 fields). Each pinned by a `sorted(d.keys()) == [...]` test so a future internal-only field can't silently leak into the output JSON consumed by `scripts/plot_hnsw_frontier.py`, `scripts/plot_latency.py`, and `scripts/cost_table.py`. Existing `.to_json()` methods kept as thin delegates so `cli.py` and downstream callers don't churn.
+- Added package-level `dump_benchmark_json(path, *, result, force=False)` in `harness.py` and `dump_load_matrix_json(out_dir, *, matrix, force=False)` in `load.py`. Both pull the inline `force`-check + `json.dumps` + `atomic_write_text` triples out of `run_benchmark` / `run_under_load`. The runners call the wrappers internally (single source of truth for the file-writing logic) and pre-flight the `force=False` collision before paying workload cost. Honors D-007 idempotency + D-012 atomic_write_text routing without a new decision.
+- Dropped the no-longer-needed `_json_default` fallback handler in `load.py` — `to_dict()` returns native JSON types only, so `json.dumps` doesn't need a `default=` arm. One less surface for downstream readers to reason about.
+- Extended the public surface: `LoadCell`, `LoadMatrix`, `dump_benchmark_json`, `dump_load_matrix_json`, `run_under_load` added to `vector_bench/__init__.py` top-level imports and `__all__`. `tests/test_public_surface.py` `SUBMODULE_ANCHORS` extended with the `load` submodule anchored by `run_under_load`. Arch-doc lock `KNOWN_SHIPPED_ISSUES` extended to include `#39` (both the module constant and the hard-pin test).
+- Test suite grew from 217 → 240 cases (23 new): 4 `Workload.to_dict`, 2 `LatencyStats.to_dict`, 4 `BenchmarkResult.to_dict` (incl. shallow-copy of `extra`), 4 `dump_benchmark_json` (round-trip, refuse-overwrite, force, monkeypatch routing proof), 2 `LoadCell.to_dict`, 2 `LoadMatrix.to_dict`, 5 `dump_load_matrix_json`. Arch-doc lock caught my first draft (the new doc section quoted banned phrase "this PR" — corrected to "with #39 landed"), validating the lock pre-merge.
+
+**Why this work, this session:** Iteration 1 of the night session loop. `vector-search-at-scale` was the last Python repo in the portfolio still serving JSON shapes via bare `dataclasses.asdict`, the same gap closed today across `python-async-llm-pipelines` (#45), `rag-production-kit` (#51), and `llm-cost-optimizer` (#51 + #53). Closing it here saturates the observability-parity arc across all four Python JSON-writing repos.
+
+**Open questions / blockers:** none — ready for review.
+
+**Next session:** Continue the night-session multi-repo loop. Remaining untouched-since-2026-05-27 candidates: `mcp-server-cookbook` (TS), `nextjs-streaming-ai-patterns`, `ai-app-integration-tests`. Each may have observability or validate parity opportunities; TS variant of the dump_*_json pattern is the natural extension.

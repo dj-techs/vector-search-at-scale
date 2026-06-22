@@ -12,8 +12,11 @@ Exercises the stub backend across concurrency levels, asserts that:
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from vector_bench.backends.stub import StubBackend
@@ -394,3 +397,60 @@ class TestDumpLoadMatrixJson:
         assert len(calls) == 1
         assert calls[0][0] == tmp_path / "routed"
         assert isinstance(calls[0][1], LoadMatrix)
+
+
+# ----------------------------------------------------------------------
+# Throughput is measured from wall-clock, not assumed-linear (#47)
+# ----------------------------------------------------------------------
+# The old `throughput_qps = n_queries / (sum(latencies)/c)` divided the *sum*
+# of overlapping per-query service times by the concurrency, baking in perfect
+# linear scaling: QPS grew with `c` by construction even for a backend that
+# gains nothing from it, and could exceed the backend's physical serialization
+# ceiling. A backend that serializes every query behind one lock with a fixed
+# service time can serve at most ~1/service_time QPS at ANY concurrency; the
+# reported throughput must never exceed that ceiling.
+
+_SERVICE_S = 0.005  # 5 ms fixed, fully serialized → ~200 QPS hard ceiling
+
+
+class _SerializedBackend(StubBackend):
+    """Stub whose queries are serialized behind one lock with a fixed cost.
+
+    Models a single-connection engine that gets zero benefit from client
+    concurrency, so its real throughput is bounded by ``1 / _SERVICE_S``
+    regardless of how many workers drive it.
+    """
+
+    name = "serialized"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._gate = threading.Lock()
+
+    def query(self, vector: np.ndarray, k: int) -> list[tuple[str, float]]:
+        with self._gate:
+            time.sleep(_SERVICE_S)
+            return super().query(vector, k)
+
+
+def test_run_under_load_throughput_respects_serialization_ceiling(tmp_path: Path):
+    workload = Workload(n_vectors=64, dim=16, n_queries=16, top_k=5, seed=1)
+    ceiling_qps = 1.0 / _SERVICE_S
+    matrix = run_under_load(
+        _SerializedBackend(),
+        workload,
+        run_id="serialized_ceiling",
+        concurrency_levels=(1, 4, 16),
+        results_dir=tmp_path,
+        write_json=False,
+    )
+    for cell in matrix.cells:
+        assert cell.throughput_qps > 0.0
+        # 15% headroom for perf_counter resolution / scheduling jitter. The old
+        # assume-linear formula reported well above the ceiling at c=16
+        # (a physically-impossible QPS); the measured wall-clock number cannot,
+        # because the lock forces at least n_queries * _SERVICE_S of wall time.
+        assert cell.throughput_qps <= ceiling_qps * 1.15, (
+            f"c={cell.concurrency}: reported {cell.throughput_qps:.1f} QPS exceeds "
+            f"the {ceiling_qps:.0f} QPS serialization ceiling"
+        )

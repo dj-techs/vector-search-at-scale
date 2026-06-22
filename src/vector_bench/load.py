@@ -205,14 +205,22 @@ def run_under_load(
         ingest_seconds = time.perf_counter() - ingest_start
 
         for c in concurrency_levels:
+            # Throughput is measured from the wall-clock the concurrent query
+            # phase actually took, not derived from the per-query latencies.
+            # The old `n_queries / (sum(latencies)/c)` baked in perfect linear
+            # scaling: it divided the *sum* of overlapping per-query service
+            # times by `c`, so QPS grew with concurrency by construction even
+            # for a backend that gains nothing from it — and could report a
+            # throughput above the backend's physical serialization ceiling
+            # (#47). `_execute_at_concurrency` runs the queries for real, so the
+            # honest number is queries-served / wall-clock-elapsed.
+            query_start = time.perf_counter()
             latencies_ms, recalls = _execute_at_concurrency(
                 backend, queries, truth, workload.top_k, c
             )
-            total_ms = sum(latencies_ms)
+            query_elapsed_s = time.perf_counter() - query_start
             throughput_qps = (
-                workload.n_queries / (total_ms / 1000.0 / max(c, 1))
-                if total_ms > 0
-                else float("inf")
+                workload.n_queries / query_elapsed_s if query_elapsed_s > 0 else float("inf")
             )
             cell = LoadCell(
                 run_id=run_id,

@@ -362,3 +362,16 @@ concurrency-lock arc.
 **Open questions / blockers:** none. Test count 238 → 245.
 
 **Next session:** continue propagation to remaining 4 repos.
+
+## 2026-06-22 — Issue #47: run_under_load — measure wall-clock throughput
+**Duration:** ~30 min · **Branch:** `session/2026-06-22-1924-issue-47`
+
+- Found via a Phase A Explore-subagent sweep over the core package (harness/load/cost/prices/hnsw_sim/stub/io_utils/cli/scripts) — picked because vector-search-at-scale was >36h stale at build-sequence position 7. `run_under_load` computed `throughput_qps` as `n_queries / (sum(latencies)/c)`: dividing the *sum* of overlapping per-query service times by the concurrency bakes in perfect linear scaling, so the QPS column grew with `c` by construction even for a backend that gains nothing — and could report a throughput above the backend's physical serialization ceiling. Same "silent numerical quality bug" class as D-011.
+- Fix: the harness already runs the queries concurrently for real, so measure the query phase's wall-clock and use the canonical `throughput_qps = n_queries / wall_clock_s`. Dropped the now-dead `max(c, 1)`. Latency stats, per-cell JSON, and idempotency untouched.
+- Demonstration: a lock-serialized 5 ms backend is physically capped at ~200 QPS; pre-fix the formula reported 297 QPS at concurrency 16. Added a property-invariant test asserting reported throughput stays at/below the serialization ceiling. Verified it fails pre-fix, passes post-fix. Full suite green, ruff clean. PR #48 ready.
+
+**Why this work, this session:** the repo had zero open issues; a dogfood sweep surfaced a real benchmark-number correctness bug (physically-impossible reported QPS) — strictly higher value than a synthetic fill.
+
+**Open questions / blockers:** none.
+
+**Next session:** the throughput number is now measured rather than assumed. A possible follow-on (deferred, not filed): separating per-query *service* time from *queue wait* in `_execute_at_concurrency`, which would let latency stats under load distinguish the two — only worth it if a future session needs substantive work here.

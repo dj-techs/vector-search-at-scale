@@ -387,3 +387,16 @@ concurrency-lock arc.
 **Open questions / blockers:** none.
 
 **Next session:** chart styling/axis-label polish left out of scope.
+
+---
+## 2026-06-23 — Issue #51: cost_per_query accepted NaN/inf throughput
+**Duration:** ~15 min · **Branch:** `session/2026-06-23-0412-issue-51`
+
+- Fixed a non-finite-input gap in `cost_per_query`. The `<=0` guard let NaN and +inf through (both compare False to `<= 0`), so a nan throughput produced `usd_per_query=nan` and an inf throughput a fabricated `$0.00/query`. `run_under_load` emits inf throughput when query time rounds to 0, which round-trips through JSON into this public API and `scripts/cost_table.py`.
+- Added a `math.isfinite` check (message keeps the "must be positive" substring). Parametrized nan/inf/-inf rejection test. Red pre-fix, green post-fix. Suite 248 → 249, ruff clean. Completes the finiteness-guard arc (#27/#29/#31).
+
+**Why this work, this session:** found by a different-angle second pass in the night session's Phase A dogfood wave; a real silent-garbage-cost bug reachable through the documented CLI → cost_table pipeline.
+
+**Open questions / blockers:** none.
+
+**Next session:** `seconds_per_month` shares the `<=0` shape but is a fixed constant, never reachably non-finite; left out of scope.

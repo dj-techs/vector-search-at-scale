@@ -50,6 +50,12 @@ def _load_matrix(path: Path) -> LoadMatrix:
                 git_sha=c.get("git_sha"),
             )
         )
+    # Canonicalize cells ascending by concurrency. They're stored in whatever
+    # order `--concurrency` was passed; the plot path consumes them in array
+    # order on a log x-axis, so an unsorted (e.g. 100,10,1) matrix would draw a
+    # backtracking latency line. `render_table` already sorts, so this is
+    # idempotent there and fixes the chart for free.
+    cells.sort(key=lambda c: c.concurrency)
     return LoadMatrix(
         run_id=data["run_id"],
         backend=data["backend"],

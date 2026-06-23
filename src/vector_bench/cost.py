@@ -41,6 +41,7 @@ than guessing. Same posture as `llm-cost-optimizer.pricing` (D-003).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 # ----------------------------------------------------------------------
@@ -279,8 +280,12 @@ def cost_per_query(
     — a workload that runs three hours per day instead of 24 should
     multiply the per-query result by 8. The README leads with that.
     """
-    if throughput_qps <= 0:
-        raise ValueError(f"throughput_qps must be positive, got {throughput_qps}")
+    # Reject non-finite too: `nan <= 0` and `inf <= 0` are both False, so a
+    # sign-only check would let nan qps yield `usd_per_query=nan` and inf qps a
+    # fabricated `$0.00/query`. `run_under_load` emits `inf` throughput when
+    # query time rounds to 0, and that round-trips through JSON into this API.
+    if not math.isfinite(throughput_qps) or throughput_qps <= 0:
+        raise ValueError(f"throughput_qps must be positive and finite, got {throughput_qps}")
     if seconds_per_month <= 0:
         raise ValueError(f"seconds_per_month must be positive, got {seconds_per_month}")
     breakdown = monthly_cost(infra, prices)

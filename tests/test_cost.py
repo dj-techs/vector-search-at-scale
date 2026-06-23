@@ -163,6 +163,16 @@ def test_cost_per_query_rejects_non_positive_qps(bad_qps: float):
         cost_per_query(spec, FIXTURE_PRICES, bad_qps)
 
 
+@pytest.mark.parametrize("bad_qps", [float("nan"), float("inf"), float("-inf")])
+def test_cost_per_query_rejects_non_finite_qps(bad_qps: float):
+    # `nan <= 0` and `inf <= 0` are both False, so a sign-only guard let nan
+    # produce usd_per_query=nan and inf a fabricated $0.00/query. run_under_load
+    # emits inf throughput when query time rounds to 0, reaching this API.
+    spec = _spec()
+    with pytest.raises(ValueError, match="positive and finite"):
+        cost_per_query(spec, FIXTURE_PRICES, bad_qps)
+
+
 def test_cost_per_query_rejects_non_positive_seconds_per_month():
     spec = _spec()
     with pytest.raises(ValueError, match="seconds_per_month must be positive"):

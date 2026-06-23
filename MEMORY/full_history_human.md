@@ -376,6 +376,19 @@ concurrency-lock arc.
 
 **Next session:** the throughput number is now measured rather than assumed. A possible follow-on (deferred, not filed): separating per-query *service* time from *queue wait* in `_execute_at_concurrency`, which would let latency stats under load distinguish the two — only worth it if a future session needs substantive work here.
 
+## 2026-06-23 — Issue #49: latency chart plotted cells in stored (unsorted) order
+**Duration:** ~20 min · **Branch:** `session/2026-06-23-0341-issue-49`
+
+- Fixed a misleading-chart bug in `scripts/plot_latency.py`. It built the p50/p95/p99 line series from `m.cells` in stored order and plotted them on a log x-axis. Cells are persisted in `--concurrency` input order, so a non-ascending list (e.g. `100,10,1`) drew a backtracking zig-zag, even though `render_table` (which sorts) produced a correct table from the same matrix.
+- Sorted cells ascending by concurrency in `_load_matrix`, canonicalizing the matrix for the plot path. Added the script's first test (`tests/test_plot_latency.py`) using `importlib` + the real serializer. Red pre-fix, green post-fix. Suite 246 → 247, ruff clean.
+
+**Why this work, this session:** found by the night session's Phase A dogfood wave; a real, uncovered defect on a documented entry point. Lower severity (chart cosmetics — the data and table were always correct), but a clean fix with a unit test.
+
+**Open questions / blockers:** none.
+
+**Next session:** chart styling/axis-label polish left out of scope.
+
+---
 ## 2026-06-23 — Issue #51: cost_per_query accepted NaN/inf throughput
 **Duration:** ~15 min · **Branch:** `session/2026-06-23-0412-issue-51`
 

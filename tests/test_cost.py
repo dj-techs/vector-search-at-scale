@@ -218,17 +218,33 @@ def _valid_instance_kwargs() -> dict:
 @pytest.mark.parametrize(
     ("field", "bad_value", "bound_pattern"),
     [
-        ("usd_per_hour", -0.01, r"usd_per_hour must be >= 0\.0"),
-        ("usd_per_hour", -100.0, r"usd_per_hour must be >= 0\.0"),
+        ("usd_per_hour", -0.01, r"usd_per_hour must be a finite number >= 0\.0"),
+        ("usd_per_hour", -100.0, r"usd_per_hour must be a finite number >= 0\.0"),
         ("vcpus", 0, r"vcpus must be >= 1"),
         ("vcpus", -1, r"vcpus must be >= 1"),
-        ("memory_gib", -0.1, r"memory_gib must be >= 0\.0"),
+        ("memory_gib", -0.1, r"memory_gib must be a finite number >= 0\.0"),
     ],
 )
 def test_instance_price_rejects_invalid_numeric(field: str, bad_value: float, bound_pattern: str):
     kwargs = _valid_instance_kwargs()
     kwargs[field] = bad_value
     with pytest.raises(ValueError, match=bound_pattern):
+        InstancePrice(**kwargs)
+
+
+# Issue #53: the sign-only float guards on the price dataclasses are widened to
+# finiteness. `nan < 0.0` and `float("inf") < 0.0` are both False, so a
+# non-finite rate slipped past the #27 negative guard and poisoned
+# monthly_cost() -> total_usd_month -> cost_per_query into a fabricated nan/Inf
+# row. Same harm class as the downstream cost_per_query qps guard (#51) and the
+# sibling llm-cost-optimizer.pricing finiteness sweep (#71). vcpus and the EBS
+# baselines are ints (cannot be non-finite) and stay on the sign-only check.
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("field", ["usd_per_hour", "memory_gib"])
+def test_instance_price_rejects_non_finite(field: str, bad: float):
+    kwargs = _valid_instance_kwargs()
+    kwargs[field] = bad
+    with pytest.raises(ValueError, match=rf"{field} must be a finite number >= 0\.0"):
         InstancePrice(**kwargs)
 
 
@@ -260,7 +276,25 @@ def _valid_ebs_kwargs() -> dict:
 def test_ebs_gp3_price_rejects_negative_rate(field: str, bad_value: float):
     kwargs = _valid_ebs_kwargs()
     kwargs[field] = bad_value
-    with pytest.raises(ValueError, match=rf"{field} must be >= 0\.0"):
+    with pytest.raises(ValueError, match=rf"{field} must be a finite number >= 0\.0"):
+        EbsGp3Price(**kwargs)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "usd_per_gb_month",
+        "usd_per_iops_month_over_baseline",
+        "usd_per_mibps_month_over_baseline",
+    ],
+)
+def test_ebs_gp3_price_rejects_non_finite_rate(field: str, bad: float):
+    # #53 finiteness widening on the storage-side rate fields (see the
+    # InstancePrice non-finite test above for the shared rationale).
+    kwargs = _valid_ebs_kwargs()
+    kwargs[field] = bad
+    with pytest.raises(ValueError, match=rf"{field} must be a finite number >= 0\.0"):
         EbsGp3Price(**kwargs)
 
 

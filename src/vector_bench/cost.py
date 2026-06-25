@@ -68,16 +68,28 @@ class InstancePrice:
         # extends the same posture to silent-negative. A negative usd_per_hour
         # flows through monthly_cost() at line 194 and inverts the sign of
         # total_usd_month in the published cost table.
+        #
+        # The sign-only check is widened to finiteness (#53), matching the
+        # downstream cost_per_query() guard (#51) and the sibling
+        # llm-cost-optimizer.pricing sweep (#71): `nan < 0.0` and
+        # `float("inf") < 0.0` are both False, so a non-finite usd_per_hour or
+        # memory_gib slipped past the negative guard and poisoned monthly_cost()
+        # -> total_usd_month -> cost_per_query (a nan rate makes usd_per_query
+        # nan, +Inf makes it Inf), surfacing a fabricated row in the published
+        # cost table with no diagnostic. vcpus is an int (< 1 guard) and cannot
+        # be non-finite, so it is left as-is.
         if not self.instance_type:
             raise ValueError("instance_type must be a non-empty string")
         if not self.region:
             raise ValueError("region must be a non-empty string")
-        if self.usd_per_hour < 0.0:
-            raise ValueError(f"usd_per_hour must be >= 0.0; got {self.usd_per_hour}")
+        if not math.isfinite(self.usd_per_hour) or self.usd_per_hour < 0.0:
+            raise ValueError(
+                f"usd_per_hour must be a finite number >= 0.0; got {self.usd_per_hour}"
+            )
         if self.vcpus < 1:
             raise ValueError(f"vcpus must be >= 1; got {self.vcpus}")
-        if self.memory_gib < 0.0:
-            raise ValueError(f"memory_gib must be >= 0.0; got {self.memory_gib}")
+        if not math.isfinite(self.memory_gib) or self.memory_gib < 0.0:
+            raise ValueError(f"memory_gib must be a finite number >= 0.0; got {self.memory_gib}")
 
 
 @dataclass(frozen=True)
@@ -97,8 +109,10 @@ class EbsGp3Price:
     included_throughput_mibps: int = 125
 
     def __post_init__(self) -> None:
-        # See InstancePrice.__post_init__ — same D-010 sign-flip guard,
-        # applied to the storage-side cost surface.
+        # See InstancePrice.__post_init__ — same D-010 sign-flip guard plus the
+        # #53 finiteness widening, applied to the storage-side cost surface.
+        # A non-finite usd_per_gb_month / per-IOPS / per-MiBps rate poisons the
+        # storage, iops, and throughput cost lines the same way.
         if not self.region:
             raise ValueError("region must be a non-empty string")
         for name, value in (
@@ -106,8 +120,8 @@ class EbsGp3Price:
             ("usd_per_iops_month_over_baseline", self.usd_per_iops_month_over_baseline),
             ("usd_per_mibps_month_over_baseline", self.usd_per_mibps_month_over_baseline),
         ):
-            if value < 0.0:
-                raise ValueError(f"{name} must be >= 0.0; got {value}")
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be a finite number >= 0.0; got {value}")
         if self.included_iops < 0:
             raise ValueError(f"included_iops must be >= 0; got {self.included_iops}")
         if self.included_throughput_mibps < 0:

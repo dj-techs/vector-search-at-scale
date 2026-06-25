@@ -400,3 +400,16 @@ concurrency-lock arc.
 **Open questions / blockers:** none.
 
 **Next session:** `seconds_per_month` shares the `<=0` shape but is a fixed constant, never reachably non-finite; left out of scope.
+
+---
+## 2026-06-25 — Issue #53: non-finite prices poisoned the cost table at the construction seam
+**Duration:** ~30 min · **Branch:** `session/2026-06-25-1519-issue-53`
+
+- `InstancePrice` and `EbsGp3Price` validated their float rate fields with sign-only checks (`value < 0.0`) added in #27. Since `nan < 0.0` and `float("inf") < 0.0` are both False, a non-finite `usd_per_hour` / `memory_gib` / EBS rate slipped past construction, flowed through `monthly_cost()` into `CostBreakdown.total_usd_month`, and out of `cost_per_query()` as a fabricated `nan` / `$0.00` (or `Inf`) row in the published `docs/cost_per_query.md` — with no diagnostic.
+- Widened the float-rate guards to `math.isfinite(...) or value < 0.0` (message unified to `"<field> must be a finite number >= 0.0"`), mirroring the downstream `cost_per_query` qps guard (#51) and the sibling `llm-cost-optimizer.pricing` finiteness sweep (#71). Integer fields stay on the sign-only check (ints can't be non-finite). 15 new tests, red-without / green-with, suite 250 → 265, ruff clean. Purely a rejection-widening — no valid price changed, so the cost-table snapshot is untouched.
+
+**Why this work, this session:** vector-search-at-scale was the earliest repo in build sequence among those >36h stale (priority tier all fresh after the llm-cost-optimizer work this run; mcp-server-cookbook's #54/#55 are human-blocked decision-revisit, skipped per D-007). The construction-seam finiteness gap was the un-closed half of the repo's own defensive-validation arc.
+
+**Open questions / blockers:** none.
+
+**Next session:** `InfraSpec` int fields and the EBS baselines are int-typed and can't be non-finite, so no parallel guard is needed there; the finiteness arc on this cost model is now complete across both the construction seams and `cost_per_query`.

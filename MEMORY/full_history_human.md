@@ -413,3 +413,15 @@ concurrency-lock arc.
 **Open questions / blockers:** none.
 
 **Next session:** `InfraSpec` int fields and the EBS baselines are int-typed and can't be non-finite, so no parallel guard is needed there; the finiteness arc on this cost model is now complete across both the construction seams and `cost_per_query`.
+
+## 2026-06-26 — Issue #55: BenchmarkResult finiteness guard + no invalid-JSON Infinity
+**Duration:** ~25 min · **Branch:** session/2026-06-26-0331-issue-55
+
+- `run_benchmark` fabricated `ingest_rows_per_sec=float("inf")` on a 0-second ingest, which `dump_benchmark_json` serialized (json.dumps default `allow_nan=True`) as the bare token `Infinity` — invalid JSON that strict parsers reject, and a fabricated number (handoff §10). `BenchmarkResult` was the one result dataclass without a `__post_init__`, unlike `Workload`/`InstancePrice`/`cost_per_query`.
+- Replaced the `inf` fabrication with a fail-loud guard at the measurement site (non-positive `ingest_seconds` → clear `ValueError`), and added a `BenchmarkResult.__post_init__` rejecting non-finite/out-of-range floats. 19 tests incl. a strict `json.loads` round-trip proving no `Infinity`/`NaN` token.
+
+**Why this work, this session:** Surfaced by a Phase A dogfood Explore agent, hand-verified; lower reachability than the rag #86 sibling so filed priority:med. Closes a latent output-integrity gap (sibling of rag #80).
+
+**Open questions / blockers:** none. `load.py`'s `LoadCell`/matrix dataclasses may share the missing-guard pattern — deferred follow-up.
+
+**Next session:** harness output is now finiteness-guarded; consider the load.py matrix dataclasses next time in this repo.

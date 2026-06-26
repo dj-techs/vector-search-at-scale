@@ -26,6 +26,7 @@ recorded in the output JSON.
 from __future__ import annotations
 
 import json
+import math
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -127,6 +128,34 @@ class BenchmarkResult:
     git_sha: str | None
     cost_per_query_usd: float | None  # populated by issue #5
     extra: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Finiteness/range guards (#55) — `BenchmarkResult` was the one result
+        # dataclass without a `__post_init__`, while `Workload` (#29),
+        # `InstancePrice`/`EbsGp3Price` (#53), and `cost_per_query` (#51) all
+        # guard their numerics. A non-finite field reaches `dump_benchmark_json`'s
+        # `json.dumps` (default allow_nan=True), which emits the bare token
+        # `Infinity`/`NaN` — invalid JSON that strict parsers (jq, JS, Go) reject,
+        # and a fabricated number in a benchmark whose whole point is honest
+        # measured values (handoff §10). Sibling of rag-production-kit #80. Fail
+        # loud at construction so corrupt data from any path can't reach the dump.
+        for name, value in [
+            ("ingest_seconds", self.ingest_seconds),
+            ("ingest_rows_per_sec", self.ingest_rows_per_sec),
+        ]:
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be a finite number >= 0, got {value!r}")
+        if not math.isfinite(self.mean_recall_at_k) or not (0.0 <= self.mean_recall_at_k <= 1.0):
+            raise ValueError(
+                f"mean_recall_at_k must be a finite number in [0, 1], got {self.mean_recall_at_k!r}"
+            )
+        if self.cost_per_query_usd is not None and (
+            not math.isfinite(self.cost_per_query_usd) or self.cost_per_query_usd < 0
+        ):
+            raise ValueError(
+                f"cost_per_query_usd must be a finite number >= 0 when set, "
+                f"got {self.cost_per_query_usd!r}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         # Eleven-field contract (#39). Nests `workload.to_dict()` and
@@ -333,6 +362,17 @@ def run_benchmark(
         ingest_start = time.perf_counter()
         backend.ingest(corpus, corpus_ids)
         ingest_seconds = time.perf_counter() - ingest_start
+        # A non-positive ingest time is a degenerate measurement (a clock that
+        # didn't advance, or a no-op backend): there's no meaningful rows/sec to
+        # report. The previous `else float("inf")` fabricated an infinite
+        # throughput that serialized as the invalid-JSON token `Infinity` (#55).
+        # Fail loud at the measurement site instead, where the cause is locatable.
+        if ingest_seconds <= 0:
+            raise ValueError(
+                f"ingest finished in a non-positive {ingest_seconds:.6g}s; a degenerate "
+                "ingest time can't yield a meaningful ingest_rows_per_sec — check the "
+                "backend's ingest timing (a no-op or sub-resolution clock)"
+            )
 
         latencies_ms: list[float] = []
         recalls: list[float] = []
@@ -355,9 +395,8 @@ def run_benchmark(
         backend=backend.name,
         workload=workload,
         ingest_seconds=ingest_seconds,
-        ingest_rows_per_sec=workload.n_vectors / ingest_seconds
-        if ingest_seconds > 0
-        else float("inf"),
+        # ingest_seconds is guaranteed > 0 by the guard above, so this is finite.
+        ingest_rows_per_sec=workload.n_vectors / ingest_seconds,
         query_latency=latency_stats,
         mean_recall_at_k=sum(recalls) / len(recalls) if recalls else 0.0,
         started_at=started_at,

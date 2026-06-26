@@ -20,8 +20,9 @@ import numpy as np
 import pytest
 
 from vector_bench.backends.stub import StubBackend
-from vector_bench.harness import Workload
+from vector_bench.harness import LatencyStats, Workload
 from vector_bench.load import (
+    LoadCell,
     LoadMatrix,
     dump_load_matrix_json,
     render_table,
@@ -454,3 +455,72 @@ def test_run_under_load_throughput_respects_serialization_ceiling(tmp_path: Path
             f"c={cell.concurrency}: reported {cell.throughput_qps:.1f} QPS exceeds "
             f"the {ceiling_qps:.0f} QPS serialization ceiling"
         )
+
+
+# ----------------------------------------------------------------------
+# #57: LoadCell finiteness/range guard + no invalid-JSON Infinity token
+# (load-matrix sibling of the BenchmarkResult guard in #55)
+# ----------------------------------------------------------------------
+
+
+def _make_cell(**overrides: object) -> LoadCell:
+    base: dict[str, object] = {
+        "run_id": "r",
+        "backend": "stub",
+        "workload": Workload(n_vectors=20, dim=4, n_queries=5, top_k=3, seed=1),
+        "concurrency": 4,
+        "ingest_seconds": 0.5,
+        "query_latency": LatencyStats(p50_ms=1.0, p95_ms=2.0, p99_ms=3.0, max_ms=4.0),
+        "mean_recall_at_k": 0.9,
+        "throughput_qps": 40.0,
+        "started_at": "2026-06-26T00:00:00Z",
+        "git_sha": None,
+    }
+    base.update(overrides)
+    return LoadCell(**base)  # type: ignore[arg-type]
+
+
+class TestLoadCellFinitenessGuard:
+    def test_valid_cell_dumps_to_strict_json(self) -> None:
+        cell = _make_cell(throughput_qps=1234.0)
+        parsed = json.loads(json.dumps(cell.to_dict()))  # strict: raises on Infinity/NaN
+        assert parsed["throughput_qps"] == 1234.0
+
+    @pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan"), -1.0])
+    def test_rejects_non_finite_or_negative_throughput(self, bad: float) -> None:
+        with pytest.raises(ValueError, match=r"throughput_qps must be a finite number >= 0"):
+            _make_cell(throughput_qps=bad)
+
+    @pytest.mark.parametrize("bad", [float("inf"), float("nan"), -0.001])
+    def test_rejects_non_finite_or_negative_ingest_seconds(self, bad: float) -> None:
+        with pytest.raises(ValueError, match=r"ingest_seconds must be a finite number >= 0"):
+            _make_cell(ingest_seconds=bad)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -0.1, 1.5])
+    def test_rejects_out_of_range_mean_recall(self, bad: float) -> None:
+        with pytest.raises(
+            ValueError, match=r"mean_recall_at_k must be a finite number in \[0, 1\]"
+        ):
+            _make_cell(mean_recall_at_k=bad)
+
+
+class TestRunUnderLoadDegenerateQueryPhase:
+    def test_non_positive_query_elapsed_raises(self, tmp_path: Path, monkeypatch) -> None:
+        # Pin perf_counter to a constant so the query-phase wall-clock is 0: the
+        # guard must fail loud instead of fabricating inf throughput.
+        import vector_bench.load as load_mod
+
+        monkeypatch.setattr(load_mod.time, "perf_counter", lambda: 500.0)
+        w = Workload(n_vectors=20, dim=4, n_queries=5, top_k=3, seed=1)
+        with pytest.raises(
+            ValueError,
+            match=r"non-positive .* query-phase wall-clock|query phase finished in a non-positive",
+        ):
+            run_under_load(
+                StubBackend(),
+                w,
+                run_id="degenerate-load",
+                concurrency_levels=(1,),
+                results_dir=tmp_path,
+                write_json=False,
+            )

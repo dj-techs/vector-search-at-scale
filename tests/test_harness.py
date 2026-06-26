@@ -148,6 +148,82 @@ class TestRunBenchmarkConcurrencyGate:
         with pytest.raises(ValueError, match="run_benchmark requires workload.concurrency == 1"):
             run_benchmark(StubBackend(), w, run_id="c4", results_dir=tmp_path)
 
+
+# ----------------------------------------------------------------------
+# #55: BenchmarkResult finiteness/range guards + no invalid-JSON token
+# ----------------------------------------------------------------------
+
+
+def _make_result(**overrides: object) -> BenchmarkResult:
+    """Construct a valid BenchmarkResult, overriding individual fields.
+
+    BenchmarkResult was the one result dataclass without a __post_init__; a
+    non-finite field reached json.dumps and serialized as the invalid-JSON
+    token `Infinity`/`NaN`. These tests pin the guard added in #55.
+    """
+    base: dict[str, object] = {
+        "run_id": "r",
+        "backend": "stub",
+        "workload": Workload(n_vectors=20, dim=4, n_queries=5, top_k=3, seed=1),
+        "ingest_seconds": 0.5,
+        "ingest_rows_per_sec": 40.0,
+        "query_latency": LatencyStats(p50_ms=1.0, p95_ms=2.0, p99_ms=3.0, max_ms=4.0),
+        "mean_recall_at_k": 0.9,
+        "started_at": "2026-06-26T00:00:00Z",
+        "git_sha": None,
+        "cost_per_query_usd": None,
+    }
+    base.update(overrides)
+    return BenchmarkResult(**base)  # type: ignore[arg-type]
+
+
+class TestBenchmarkResultFinitenessGuard:
+    def test_valid_result_constructs_and_dumps_to_strict_json(self) -> None:
+        # The clean path still round-trips through the *strict* JSON parser
+        # (allow_nan defaults False on json.loads), proving no Infinity/NaN token.
+        result = _make_result(ingest_rows_per_sec=12345.0, cost_per_query_usd=0.0001)
+        text = json.dumps(result.to_dict(), indent=2, sort_keys=True)
+        parsed = json.loads(text)  # strict: raises on Infinity/NaN
+        assert parsed["ingest_rows_per_sec"] == 12345.0
+
+    @pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan"), -1.0])
+    def test_rejects_non_finite_or_negative_ingest_rows_per_sec(self, bad: float) -> None:
+        with pytest.raises(ValueError, match=r"ingest_rows_per_sec must be a finite number >= 0"):
+            _make_result(ingest_rows_per_sec=bad)
+
+    @pytest.mark.parametrize("bad", [float("inf"), float("nan"), -0.001])
+    def test_rejects_non_finite_or_negative_ingest_seconds(self, bad: float) -> None:
+        with pytest.raises(ValueError, match=r"ingest_seconds must be a finite number >= 0"):
+            _make_result(ingest_seconds=bad)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -0.1, 1.5])
+    def test_rejects_out_of_range_mean_recall(self, bad: float) -> None:
+        with pytest.raises(
+            ValueError, match=r"mean_recall_at_k must be a finite number in \[0, 1\]"
+        ):
+            _make_result(mean_recall_at_k=bad)
+
+    @pytest.mark.parametrize("bad", [float("inf"), float("nan"), -0.5])
+    def test_rejects_non_finite_or_negative_cost(self, bad: float) -> None:
+        with pytest.raises(ValueError, match=r"cost_per_query_usd must be a finite number >= 0"):
+            _make_result(cost_per_query_usd=bad)
+
+    def test_none_cost_is_accepted(self) -> None:
+        # cost_per_query_usd is Optional; None (unpopulated, pre-#5) stays valid.
+        assert _make_result(cost_per_query_usd=None).cost_per_query_usd is None
+
+
+class TestRunBenchmarkDegenerateIngest:
+    def test_non_positive_ingest_time_raises(self, tmp_path: Path, monkeypatch) -> None:
+        # Force a non-positive ingest duration by pinning perf_counter to a
+        # constant: the guard must fail loud rather than fabricate inf rows/sec.
+        import vector_bench.harness as harness_mod
+
+        monkeypatch.setattr(harness_mod.time, "perf_counter", lambda: 100.0)
+        w = Workload(n_vectors=20, dim=4, n_queries=5, top_k=3, seed=1)
+        with pytest.raises(ValueError, match=r"non-positive .* ingest time"):
+            run_benchmark(StubBackend(), w, run_id="degenerate", results_dir=tmp_path)
+
     def test_concurrency_gate_message_points_at_run_under_load_and_d011(
         self, tmp_path: Path
     ) -> None:

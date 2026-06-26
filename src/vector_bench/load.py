@@ -24,6 +24,7 @@ See `MEMORY/core_decisions_human.md` D-008 for the deliberation.
 from __future__ import annotations
 
 import json
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -60,6 +61,26 @@ class LoadCell:
     throughput_qps: float
     started_at: str
     git_sha: str | None
+
+    def __post_init__(self) -> None:
+        # Finiteness/range guards (#57) — the load-matrix sibling of the
+        # BenchmarkResult guard (#55). LoadCell had no __post_init__ while
+        # Workload (#29), InstancePrice/EbsGp3Price (#53), and BenchmarkResult
+        # (#55) all guard their numerics. A non-finite throughput_qps (e.g. the
+        # inf a zero-time query phase produced) reaches dump_* -> json.dumps
+        # (default allow_nan=True) and serializes as the bare token `Infinity` in
+        # matrix.json / the per-cell JSON plot_latency.py reads — invalid JSON and
+        # a fabricated number (handoff §10). Fail loud at construction.
+        for name, value in [
+            ("ingest_seconds", self.ingest_seconds),
+            ("throughput_qps", self.throughput_qps),
+        ]:
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be a finite number >= 0, got {value!r}")
+        if not math.isfinite(self.mean_recall_at_k) or not (0.0 <= self.mean_recall_at_k <= 1.0):
+            raise ValueError(
+                f"mean_recall_at_k must be a finite number in [0, 1], got {self.mean_recall_at_k!r}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         # Ten-field contract (#39). Nests `workload.to_dict()` +
@@ -219,9 +240,18 @@ def run_under_load(
                 backend, queries, truth, workload.top_k, c
             )
             query_elapsed_s = time.perf_counter() - query_start
-            throughput_qps = (
-                workload.n_queries / query_elapsed_s if query_elapsed_s > 0 else float("inf")
-            )
+            # A non-positive query-phase wall-clock is a degenerate measurement
+            # (a clock that didn't advance): there is no meaningful QPS. The
+            # previous `else float("inf")` fabricated an infinite throughput that
+            # serialized as the invalid-JSON token `Infinity` (#57). Fail loud at
+            # the measurement site instead, where the cause is locatable.
+            if query_elapsed_s <= 0:
+                raise ValueError(
+                    f"query phase finished in a non-positive {query_elapsed_s:.6g}s at "
+                    f"concurrency={c}; a degenerate query-phase wall-clock can't yield a "
+                    "meaningful throughput_qps — check the timer/backend"
+                )
+            throughput_qps = workload.n_queries / query_elapsed_s
             cell = LoadCell(
                 run_id=run_id,
                 backend=backend.name,
